@@ -1,0 +1,33 @@
+name: Steam图文低速爬虫
+on:
+  workflow_dispatch: # 【最重要】网页手动点击启动爬虫
+  # schedule:
+  #   - cron: '0 12 * * *' # 定时任务，不需要可以注释
+
+jobs:
+  crawl_task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v4
+
+      - name: 配置Python3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 启动低速爬虫
+        run: python steam_download.py
+
+      # 将抓取结果打包，上传到网页Artifacts，运行结束可以下载压缩包
+      - name: 打包抓取结果
+        run: zip -r crawl_result.zip hhuijk/ finished_appids.json all_game_list.json failed_appid.txt
+
+      - name: 上传压缩包
+        uses: actions/upload-artifact@v4
+        with:
+          name: game_crawl_package
+          path: crawl_result.zip
