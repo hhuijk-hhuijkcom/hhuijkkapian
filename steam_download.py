@@ -1,163 +1,115 @@
 import os
 import time
-import json
 import requests
 
-# ====================== 全局配置【防限流重点】 ======================
 APPID_TXT_URL = "https://raw.githubusercontent.com/hhuijk-hhuijkcom/hhuijk-a-p-i-d/main/appid.txt"
-ROOT_FOLDER = "hhuijk"
-DONE_RECORD_FILE = "finished_appids.json"
-FAILED_FILE = "failed_appid.txt"
-
-# ⭐防限流关键：单次循环总等待秒数，建议 ≥3，想要极其稳定设为4/5
-SLEEP_SEC = 3.0
-USE_APPID_AS_IMAGE_NAME = False  # False=header.jpg True=appid.jpg
-EXPORT_SUMMARY_JSON = True
-
+SLEEP_SEC = 3.2  # 低速防429
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
 }
-# =================================================================
-
-def safe_filename(name: str) -> str:
-    bad_chars = r'\/:*?"<>|'
-    for c in bad_chars:
-        name = name.replace(c, "_")
-    return name.strip()
-
-def load_finished_list():
-    if os.path.exists(DONE_RECORD_FILE):
-        try:
-            with open(DONE_RECORD_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return set(data)
-        except Exception:
-            return set()
-    return set()
-
-def save_finished_list(finished_set):
-    with open(DONE_RECORD_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(finished_set), f, ensure_ascii=False, indent=2)
-
-def add_failed_appid(aid):
-    with open(FAILED_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{aid}\n")
 
 def fetch_remote_appids():
-    print("🌐 正在远程拉取 appid.txt ...")
+    print("🌐 拉取appid.txt")
     resp = requests.get(APPID_TXT_URL, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
     lines = resp.text.splitlines()
-    appids = []
-    for line in lines:
-        s = line.strip()
-        if s.isdigit():
-            appids.append(s)
-    print(f"✅ 读取AppID总数：{len(appids)}")
+    appids = [s.strip() for s in lines if s.strip().isdigit()]
+    print(f"原始读取AppID总数：{len(appids)}")
     return appids
 
-def get_game_name(appid):
+def get_game_full_info(appid):
     url = f"https://store.steampowered.com/api/appdetails?appids={appid}"
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         data = r.json()
         key = str(appid)
         if data[key]["success"]:
-            return data[key]["data"]["name"]
+            return data[key]["data"]
         return None
     except Exception as e:
-        print(f"[{appid}] 获取名称失败: {str(e)}")
+        print(f"[{appid}] 查询异常：{e}")
         return None
 
-def download_image(url, save_path):
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=20)
-        if res.status_code == 200:
-            with open(save_path, "wb") as f:
-                f.write(res.content)
-            return True
-        else:
-            print(f"图片HTTP状态码：{res.status_code}")
-            return False
-    except Exception as e:
-        print(f"图片下载异常：{str(e)}")
+def is_cn_locked(game_data) -> bool:
+    packages = game_data.get("packages", [])
+    if not packages:
         return False
+    for pkg_id in packages:
+        pkg_info = game_data.get("package_groups", {}).get(str(pkg_id))
+        if not pkg_info:
+            continue
+        allow = pkg_info.get("allow_countries", "")
+        deny = pkg_info.get("deny_countries", "")
+        allow_list = allow.split(",") if allow else []
+        deny_list = deny.split(",") if deny else []
+        if "CN" in deny_list:
+            return True
+        if len(allow_list) > 0 and "CN" not in allow_list:
+            return True
+    return False
+
+def is_valid_game(game_data):
+    """筛选：只保留正式游戏本体，剔除Demo/DLC/软件/捆绑包"""
+    app_type = game_data.get("type","")
+    # 只保留game类型本体
+    if app_type != "game":
+        return False
+    # 排除demo标记
+    if game_data.get("is_demo", False):
+        return False
+    return True
 
 def main():
-    finished = load_finished_list()
-    all_game_summary = []
     appid_list = fetch_remote_appids()
+    locked_game = []
+    unlocked_game = []
+    invalid_type = [] # DLC、Demo、软件等
+    query_fail = []
 
-    # 清空旧失败记录（注释掉则追加写入，不清空）
-    if os.path.exists(FAILED_FILE):
-        os.remove(FAILED_FILE)
+    for idx, aid in enumerate(appid_list,1):
+        print(f"\n[{idx}/{len(appid_list)}] 查询 {aid}")
+        info = get_game_full_info(aid)
+        time.sleep(SLEEP_SEC)
 
-    total = len(appid_list)
-    for idx, aid in enumerate(appid_list, 1):
-        if aid in finished:
-            print(f"\n⏭️ [{idx}/{total}] {aid} 已完成，跳过")
-            time.sleep(SLEEP_SEC)
+        if not info:
+            query_fail.append(aid)
             continue
 
-        print(f"\n▶️ [{idx}/{total}] 正在处理 {aid}")
-        game_name = get_game_name(aid)
-        time.sleep(SLEEP_SEC / 2)  # 获取信息后短暂休息
-
-        if not game_name:
-            print(f"❌ {aid} 无效AppID，记入失败列表")
-            add_failed_appid(aid)
-            time.sleep(SLEEP_SEC)
+        if not is_valid_game(info):
+            invalid_type.append((aid, info["name"], info["type"]))
+            print(f"⏭️ {aid} [{info['name']}] 类型非正式游戏，跳过")
             continue
 
-        folder = os.path.join(ROOT_FOLDER, aid)
-        os.makedirs(folder, exist_ok=True)
-        safe_name = safe_filename(game_name)
-
-        # TXT文本
-        txt_path = os.path.join(folder, f"{safe_name}.txt")
-        if not os.path.exists(txt_path):
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(f"appid = {aid}\n游戏名称 = {game_name}")
-            print(f"📄 生成文本 | {game_name}")
+        lock_status = is_cn_locked(info)
+        if lock_status:
+            locked_game.append((aid, info["name"]))
+            print(f"🔒 锁国区本体：{info['name']}")
         else:
-            print(f"📄 文本已存在，跳过")
+            unlocked_game.append((aid, info["name"]))
+            print(f"✅ 国区可购买本体：{info['name']}")
 
-        # 图片
-        img_url = f"https://cdn.akamai.steamstatic.com/steam/apps/{aid}/header.jpg"
-        if USE_APPID_AS_IMAGE_NAME:
-            img_filename = f"{aid}.jpg"
-        else:
-            img_filename = "header.jpg"
-        img_path = os.path.join(folder, img_filename)
+    # 导出清单
+    with open("locked_game_本体清单.txt","w",encoding="utf-8") as f:
+        for aid,name in locked_game:
+            f.write(f"{aid} | {name}\n")
+    with open("unlocked_game_本体清单.txt","w",encoding="utf-8") as f:
+        for aid,name in unlocked_game:
+            f.write(f"{aid} | {name}\n")
+    with open("invalid_类型过滤.txt","w",encoding="utf-8") as f:
+        for aid,name,t in invalid_type:
+            f.write(f"{aid} | {name} | type:{t}\n")
+    with open("query_failed.txt","w",encoding="utf-8") as f:
+        for aid in query_fail:
+            f.write(f"{aid}\n")
 
-        if not os.path.exists(img_path):
-            dl_ok = download_image(img_url, img_path)
-            time.sleep(SLEEP_SEC / 2)
-            if dl_ok:
-                print(f"🖼️ 图片下载成功")
-            else:
-                print(f"🖼️ 图片下载失败，写入失败列表")
-                add_failed_appid(aid)
-                continue
-        else:
-            print(f"🖼️ 图片已存在，跳过")
-
-        all_game_summary.append({
-            "appid": aid,
-            "name": game_name,
-            "folder": folder
-        })
-
-        finished.add(aid)
-        save_finished_list(finished)
-        time.sleep(SLEEP_SEC)  # 本轮完整结束强制休眠
-
-    if EXPORT_SUMMARY_JSON and all_game_summary:
-        with open("all_game_list.json", "w", encoding="utf-8") as f:
-            json.dump(all_game_summary, f, ensure_ascii=False, indent=2)
-        print("\n📋 汇总清单已保存 all_game_list.json")
-
-    print("\n🎉 本轮任务执行完毕！")
+    print("\n====================统计汇总====================")
+    print(f"原始AppID总量：{len(appid_list)}")
+    print(f"❌ 过滤项(Demo/DLC/软件)：{len(invalid_type)}")
+    print(f"⚠️ 查询失败AppID：{len(query_fail)}")
+    print(f"🎮 有效正式游戏本体总数：{len(locked_game)+len(unlocked_game)}")
+    print(f"🔒 锁国区正式游戏本体：{len(locked_game)}")
+    print(f"✅ 国区可购买正式游戏本体：{len(unlocked_game)}")
+    print("==================================================")
+    print("清单文件已全部生成！")
 
 if __name__ == "__main__":
     main()
