@@ -1,0 +1,37 @@
+
+name: Sync Steam Game Images
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 每天凌晨2点自动运行
+  workflow_dispatch:      # 支持手动触发
+
+jobs:
+  sync-images:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download missing Steam images
+        run: node scripts/download-steam-images.js
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add hhuijk/ || true
+          if git diff --cached --quiet; then
+            echo "没有新图片，无需提交"
+          else
+            git commit -m "chore: 自动同步Steam游戏封面图"
+            git push
+          fi
